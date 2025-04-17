@@ -1,0 +1,1 @@
+This is a project for the image processing part of a mural painting object and it's responsable with generating instructions for the hardware.
