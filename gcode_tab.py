@@ -8,9 +8,15 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+import matplotlib.animation as animation
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, 
-                           QGroupBox, QSlider, QFileDialog, QCheckBox, QSplitter, QTextEdit)
-from PyQt5.QtCore import Qt, QTimer, QSettings
+                           QGroupBox, QSlider, QFileDialog, QCheckBox, QSplitter, QTextEdit,
+                           QProgressBar, QMessageBox, QSpinBox)
+from PyQt5.QtCore import Qt, QTimer, QSettings, QThread, pyqtSignal
+import cv2
+import tempfile
+import shutil
+from datetime import datetime
 
 class MplCanvas(FigureCanvas):
     """Matplotlib canvas for visualization."""
@@ -120,6 +126,129 @@ class GcodeSimulator:
             return self.positions[frame_index], self.colors[frame_index]
         return None, None
 
+class AnimationGeneratorThread(QThread):
+    """Thread for generating animation frames."""
+    progress_updated = pyqtSignal(int)
+    finished = pyqtSignal(str)
+    error = pyqtSignal(str)
+    
+    def __init__(self, simulator, output_path, fps=30, dpi=100, duration=30):
+        super().__init__()
+        self.simulator = simulator
+        self.output_path = output_path
+        self.fps = fps
+        self.dpi = dpi
+        self.duration = duration  # seconds
+        self.temp_dir = None
+    
+    def run(self):
+        try:
+            # Create temporary directory for frames
+            self.temp_dir = tempfile.mkdtemp()
+            
+            # Calculate frames based on duration and fps
+            num_positions = len(self.simulator.positions)
+            total_frames = self.fps * self.duration
+            
+            # Create figure for animation
+            fig = Figure(figsize=(10, 8), dpi=self.dpi)
+            ax = fig.add_subplot(111)
+            
+            # Set up the axes
+            ax.set_xlabel('X (mm)')
+            ax.set_ylabel('Y (mm)')
+            ax.set_title('G-code Visualization')
+            ax.grid(True, linestyle='--', alpha=0.7)
+            
+            # Get the bounds for the plot
+            min_x, min_y, max_x, max_y = self.simulator.bounds
+            margin = (max(max_x - min_x, max_y - min_y) * 0.05) or 10
+            ax.set_xlim(min_x - margin, max_x + margin)
+            ax.set_ylim(min_y - margin, max_y + margin)
+            
+            # Generate frames
+            for i in range(total_frames):
+                # Calculate the corresponding position index
+                position_idx = min(int(i * num_positions / total_frames), num_positions - 1)
+                
+                # Clear previous plot
+                ax.clear()
+                
+                # Re-setup the axes
+                ax.set_xlabel('X (mm)')
+                ax.set_ylabel('Y (mm)')
+                ax.set_title('G-code Visualization')
+                ax.grid(True, linestyle='--', alpha=0.7)
+                ax.set_xlim(min_x - margin, max_x + margin)
+                ax.set_ylim(min_y - margin, max_y + margin)
+                
+                # Draw path up to current position
+                positions = self.simulator.positions[:position_idx+1]
+                if positions:
+                    x_values = [pos[0] for pos in positions]
+                    y_values = [pos[1] for pos in positions]
+                    ax.plot(x_values, y_values, 'b-', alpha=0.5, linewidth=0.8)
+                
+                # Count visible dots
+                visible_dot_count = 0
+                for j, pos in enumerate(self.simulator.positions[:position_idx+1]):
+                    if pos[2] < 1.0:  # Check if it's a spray position
+                        visible_dot_count += 1
+                
+                # Show visible dots
+                dots = self.simulator.dots[:visible_dot_count]
+                colors = self.simulator.dot_colors[:visible_dot_count]
+                
+                if dots:
+                    x_values = [dot[0] for dot in dots]
+                    y_values = [dot[1] for dot in dots]
+                    rgba_colors = [(r/255, g/255, b/255, 0.7) for r, g, b in colors]
+                    ax.scatter(x_values, y_values, s=30, c=rgba_colors, marker='o', edgecolors='none')
+                
+                # Show current position
+                if position_idx < num_positions:
+                    pos, color = self.simulator.get_frame(position_idx)
+                    if pos:
+                        r, g, b = color
+                        color_normalized = (r/255, g/255, b/255)
+                        ax.plot(pos[0], pos[1], 'ro', markersize=8, markeredgecolor='black', markerfacecolor=color_normalized)
+                
+                # Draw the origin
+                ax.plot(0, 0, 'kx', markersize=8)
+                
+                # Save the frame
+                frame_path = os.path.join(self.temp_dir, f'frame_{i:05d}.png')
+                fig.savefig(frame_path)
+                
+                # Update progress
+                progress = int((i + 1) / total_frames * 100)
+                self.progress_updated.emit(progress)
+            
+            # Generate video from frames using OpenCV
+            frame = cv2.imread(os.path.join(self.temp_dir, 'frame_00000.png'))
+            height, width, _ = frame.shape
+            
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            video = cv2.VideoWriter(self.output_path, fourcc, self.fps, (width, height))
+            
+            for i in range(total_frames):
+                frame_path = os.path.join(self.temp_dir, f'frame_{i:05d}.png')
+                frame = cv2.imread(frame_path)
+                video.write(frame)
+            
+            video.release()
+            
+            # Clean up temporary directory
+            shutil.rmtree(self.temp_dir)
+            
+            self.finished.emit(self.output_path)
+        
+        except Exception as e:
+            self.error.emit(str(e))
+            # Clean up temporary directory if it exists
+            if self.temp_dir and os.path.exists(self.temp_dir):
+                shutil.rmtree(self.temp_dir)
+
 class GcodeTab(QWidget):
     """Tab for G-code visualization."""
     
@@ -133,6 +262,7 @@ class GcodeTab(QWidget):
         self.play_timer = QTimer()
         self.play_timer.timeout.connect(self.next_frame)
         self.gcode_file_path = None
+        self.animation_thread = None
         
         self.init_ui()
     
@@ -207,10 +337,55 @@ class GcodeTab(QWidget):
         playback_layout.addWidget(self.position_slider)
         playback_layout.addWidget(self.position_label)
         
+        # Animation generation controls
+        animation_group = QGroupBox("Animation Generation")
+        animation_layout = QVBoxLayout()
+        
+        animation_options = QHBoxLayout()
+        
+        # FPS control
+        fps_layout = QHBoxLayout()
+        fps_layout.addWidget(QLabel("FPS:"))
+        self.fps_spinbox = QSpinBox()
+        self.fps_spinbox.setRange(1, 60)
+        self.fps_spinbox.setValue(30)
+        fps_layout.addWidget(self.fps_spinbox)
+        
+        # Duration control
+        duration_layout = QHBoxLayout()
+        duration_layout.addWidget(QLabel("Duration (s):"))
+        self.duration_spinbox = QSpinBox()
+        self.duration_spinbox.setRange(5, 120)
+        self.duration_spinbox.setValue(30)
+        duration_layout.addWidget(self.duration_spinbox)
+        
+        animation_options.addLayout(fps_layout)
+        animation_options.addLayout(duration_layout)
+        
+        # Progress bar for animation generation
+        self.animation_progress = QProgressBar()
+        self.animation_progress.setRange(0, 100)
+        self.animation_progress.setValue(0)
+        
+        # Generate and Save buttons
+        animation_buttons = QHBoxLayout()
+        self.generate_animation_btn = QPushButton("Generate Animation")
+        self.generate_animation_btn.clicked.connect(self.generate_animation)
+        self.generate_animation_btn.setEnabled(False)
+        
+        animation_buttons.addWidget(self.generate_animation_btn)
+        
+        animation_layout.addLayout(animation_options)
+        animation_layout.addLayout(animation_buttons)
+        animation_layout.addWidget(self.animation_progress)
+        
+        animation_group.setLayout(animation_layout)
+        
         # Add components to visualization layout
         vis_layout.addWidget(self.canvas)
         vis_layout.addLayout(options_layout)
         vis_layout.addLayout(playback_layout)
+        vis_layout.addWidget(animation_group)
         vis_group.setLayout(vis_layout)
         
         # Add components to splitter
@@ -243,6 +418,7 @@ class GcodeTab(QWidget):
         self.play_btn.setEnabled(self.total_frames > 0)
         self.reset_btn.setEnabled(self.total_frames > 0)
         self.position_slider.setEnabled(self.total_frames > 0)
+        self.generate_animation_btn.setEnabled(self.total_frames > 0)
         
         # Update the visualization
         self.update_visualization()
@@ -367,3 +543,85 @@ class GcodeTab(QWidget):
         self.current_frame = value
         self.position_label.setText(f"{value} / {self.total_frames}")
         self.update_visualization()
+    
+    def generate_animation(self):
+        """Generate an MP4 animation of the G-code execution."""
+        if not self.total_frames:
+            return
+        
+        try:
+            # Ask user where to save the animation
+            default_filename = "gcode_animation.mp4"
+            if self.gcode_file_path:
+                base_name = os.path.splitext(os.path.basename(self.gcode_file_path))[0]
+                default_filename = f"{base_name}_animation.mp4"
+            
+            output_path, _ = QFileDialog.getSaveFileName(
+                self, "Save Animation", default_filename, "MP4 Files (*.mp4);;All Files (*)"
+            )
+            
+            if not output_path:
+                return
+            
+            # Disable buttons during generation
+            self.generate_animation_btn.setEnabled(False)
+            self.play_btn.setEnabled(False)
+            self.reset_btn.setEnabled(False)
+            self.position_slider.setEnabled(False)
+            
+            # Start the animation generation thread
+            self.animation_thread = AnimationGeneratorThread(
+                self.simulator,
+                output_path,
+                fps=self.fps_spinbox.value(),
+                duration=self.duration_spinbox.value()
+            )
+            
+            # Connect signals
+            self.animation_thread.progress_updated.connect(self.animation_progress.setValue)
+            self.animation_thread.finished.connect(self.animation_generation_finished)
+            self.animation_thread.error.connect(self.animation_generation_error)
+            
+            # Start the thread
+            self.animation_thread.start()
+            
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Error generating animation: {str(e)}")
+            self.reset_animation_controls()
+    
+    def animation_generation_finished(self, output_path):
+        """Handle completion of animation generation."""
+        self.animation_progress.setValue(100)
+        self.reset_animation_controls()
+        
+        # Ask if the user wants to open the video
+        reply = QMessageBox.question(
+            self, "Animation Complete", 
+            f"Animation saved to {output_path}. Do you want to open it now?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
+        )
+        
+        if reply == QMessageBox.Yes:
+            # Open the video with default application
+            import subprocess
+            import platform
+            
+            if platform.system() == 'Windows':
+                os.startfile(output_path)
+            elif platform.system() == 'Darwin':  # macOS
+                subprocess.call(('open', output_path))
+            else:  # Linux
+                subprocess.call(('xdg-open', output_path))
+    
+    def animation_generation_error(self, error_message):
+        """Handle errors in animation generation."""
+        QMessageBox.warning(self, "Error", f"Error generating animation: {error_message}")
+        self.reset_animation_controls()
+    
+    def reset_animation_controls(self):
+        """Reset animation controls after generation."""
+        # Re-enable buttons
+        self.generate_animation_btn.setEnabled(self.total_frames > 0)
+        self.play_btn.setEnabled(self.total_frames > 0)
+        self.reset_btn.setEnabled(self.total_frames > 0)
+        self.position_slider.setEnabled(self.total_frames > 0)
