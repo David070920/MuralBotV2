@@ -196,19 +196,15 @@ class ImageProcessor:
             gcode.append(f"G0 X{home_x} Y{home_y} ; Move to home for color change")
             gcode.append("M0 ; Pause for color change")
             gcode.append("")
+              # Find all dots for all colors in this batch
+            height, width, _ = quantized_image.shape
+            color_dots = {}
+            all_dots = []
             
-            # Process each color in the batch
+            # Collect all dots for all colors in the batch
             for color_idx in batch_color_indices:
                 color = palette[color_idx]
-                gcode.append(f"; Color: RGB{tuple(color)}")
-                
-                # Set the active tool (spray can)
-                spray_idx = batch_color_indices.index(color_idx)
-                gcode.append(f"T{spray_idx} ; Select spray can {spray_idx + 1}")
-                
-                # Find all dots of this color
-                height, width, _ = quantized_image.shape
-                dots = []
+                color_dots[color_idx] = []
                 
                 for y in range(height):
                     for x in range(width):
@@ -219,15 +215,60 @@ class ImageProcessor:
                             real_x = x * dot_size_mm + dot_size_mm / 2 + border_margin
                             # Flip Y axis (image coordinates are top-left, G-code is bottom-left)
                             real_y = (height - y - 1) * dot_size_mm + dot_size_mm / 2 + border_margin
-                            dots.append((real_x, real_y))
+                            dot_info = (real_x, real_y, color_idx)
+                            color_dots[color_idx].append((real_x, real_y))
+                            all_dots.append(dot_info)
+            
+            # Divide the wall into grid regions for efficient painting
+            region_size = 5 * dot_size_mm  # Adjust region size as needed
+            regions = defaultdict(list)
+            
+            # Assign dots to regions
+            for x, y, color_idx in all_dots:
+                region_x = int(x // region_size)
+                region_y = int(y // region_size)
+                regions[(region_x, region_y)].append((x, y, color_idx))
+            
+            # Sort regions for optimal path
+            sorted_regions = sorted(regions.keys())
+            if self.config["optimize_path"]:
+                # Can implement more sophisticated region sorting here if needed
+                pass
+            
+            # Initialize spray cans
+            for spray_idx, color_idx in enumerate(batch_color_indices):
+                color = palette[color_idx]
+                gcode.append(f"; Color {spray_idx + 1}: RGB{tuple(color)}")
+                gcode.append(f"T{spray_idx} ; Initialize spray can {spray_idx + 1}")
+            
+            gcode.append("; Starting dynamic color switching within batch")
+            
+            # Process each region
+            current_pos = (home_x, home_y)
+            current_tool = None
+            
+            for region_key in sorted_regions:
+                region_dots = regions[region_key]
                 
-                # Optimize path if enabled
-                if self.config["optimize_path"] and dots:
-                    dots = self._optimize_path(dots)
+                # Sort dots within region for efficiency
+                if self.config["optimize_path"] and region_dots:
+                    # Start from the closest dot to current position
+                    def dist(dot):
+                        return math.sqrt((dot[0] - current_pos[0])**2 + (dot[1] - current_pos[1])**2)
+                    region_dots.sort(key=dist)
                 
-                # Generate movement commands for this color
-                current_pos = (home_x, home_y)
-                for i, (x, y) in enumerate(dots):
+                # Process all dots in this region
+                for x, y, color_idx in region_dots:                    # Get the tool index for this color
+                    tool_idx = batch_color_indices.index(color_idx)
+                    color = palette[color_idx]
+                    
+                    # Switch tool if needed
+                    if current_tool != tool_idx:
+                        # Add a color comment in the format that the simulator recognizes
+                        gcode.append(f"; Color: RGB({color[0]}, {color[1]}, {color[2]})")
+                        gcode.append(f"T{tool_idx} ; Switch to spray can {tool_idx + 1}")
+                        current_tool = tool_idx
+                    
                     # Rapid move to position
                     gcode.append(f"G0 X{x:.2f} Y{y:.2f} Z5.0 ; Move to dot position")
                     # Lower to spray position
@@ -240,8 +281,9 @@ class ImageProcessor:
                     # Update current position
                     current_pos = (x, y)
                     total_dots += 1
-                
-                gcode.append("")
+            
+            gcode.append("; Finished dynamic color switching for this batch")
+            gcode.append("")
             
             # Update progress
             if progress_callback:
