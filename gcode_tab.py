@@ -5,17 +5,13 @@ G-code visualization tab for MuralBot application.
 import os
 import re
 import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.figure import Figure
-from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, 
-                           QGroupBox, QFileDialog, QCheckBox, QSplitter, 
-                           QProgressBar, QMessageBox, QSpinBox, QFormLayout)
-from PyQt5.QtCore import Qt, QSettings, QThread, pyqtSignal
 import cv2
 import tempfile
 import shutil
-import multiprocessing
+from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, 
+                           QGroupBox, QFileDialog, QCheckBox, QSpinBox, QFormLayout,
+                           QProgressBar, QMessageBox, QComboBox)
+from PyQt5.QtCore import Qt, QSettings, QThread, pyqtSignal
 
 class GcodeSimulator:
     """Class to parse and simulate G-code execution."""
@@ -47,19 +43,32 @@ class GcodeSimulator:
         min_x, min_y = float('inf'), float('inf')
         max_x, max_y = float('-inf'), float('-inf')
         
-        # Regular expressions for parsing
-        color_re = re.compile(r'; Color: RGB\((\d+), (\d+), (\d+)\)')
+        # New regex pattern for numpy uint8 values
+        # This pattern captures values like np.uint8(198) and extracts the number inside
+        numpy_color_re = re.compile(r'; Color: RGB\(np\.uint8\((\d+)\), np\.uint8\((\d+)\), np\.uint8\((\d+)\)\)')
+        
+        # Regular expression for standard RGB values
+        std_color_re = re.compile(r'; Color: RGB\((\d+), (\d+), (\d+)\)')
         
         for line in self.gcode_lines:
             line = line.strip()
             
+            # Check for numpy color format
+            numpy_match = numpy_color_re.search(line)
+            if numpy_match:
+                r, g, b = map(int, numpy_match.groups())
+                self.current_color = (r, g, b)
+                continue
+            
+            # Check for standard color format
+            std_match = std_color_re.search(line)
+            if std_match:
+                r, g, b = map(int, std_match.groups())
+                self.current_color = (r, g, b)
+                continue
+            
             # Skip empty lines and pure comments
             if not line or line.startswith(';'):
-                # Check for color comment
-                color_match = color_re.search(line)
-                if color_match:
-                    r, g, b = map(int, color_match.groups())
-                    self.current_color = (r, g, b)
                 continue
             
             # Remove inline comments
@@ -103,98 +112,145 @@ class GcodeSimulator:
         # Update bounds
         if min_x != float('inf'):
             self.bounds = [min_x, min_y, max_x, max_y]
-
+            
+        # Print debug statistics
+        print(f"Total positions: {len(self.positions)}")
+        print(f"Total dots: {len(self.dots)}")
+        unique_colors = set(tuple(c) for c in self.colors)
+        print(f"Unique colors detected: {len(unique_colors)}")
+        for i, color in enumerate(sorted(unique_colors)):
+            if i < 20:  # Just show first 20 colors to keep output manageable
+                print(f"  RGB{color}")
+    
     def get_frame(self, frame_index):
         """Get the position and state at a specific frame."""
         if 0 <= frame_index < len(self.positions):
             return self.positions[frame_index], self.colors[frame_index]
         return None, None
 
-class AnimationGeneratorThread(QThread):
-    """Thread for generating animation frames."""
+class OptimizedAnimationThread(QThread):
+    """Optimized thread for generating animation frames."""
     progress_updated = pyqtSignal(int)
     finished = pyqtSignal(str)
     error = pyqtSignal(str)
     
-    def __init__(self, simulator, output_path, fps=30, dpi=100, duration=30, skip_frames=False):
+    def __init__(self, simulator, output_path, fps=30, duration=30, quality='medium'):
         super().__init__()
         self.simulator = simulator
         self.output_path = output_path
         self.fps = fps
-        self.dpi = dpi
         self.duration = duration  # seconds
+        self.quality = quality    # low, medium, high
         self.temp_dir = None
-        self.skip_frames = skip_frames  # Option to skip frames for faster generation
     
     def run(self):
         try:
-            # Create temporary directory for frames
+            # Create temporary directory for frames if needed
             self.temp_dir = tempfile.mkdtemp()
             
-            # Calculate frames based on duration and fps
+            # Get basic information
             num_positions = len(self.simulator.positions)
             if num_positions == 0:
                 self.error.emit("No G-code positions found")
                 return
-                
+            
+            # Calculate total frames based on duration and fps
             total_frames = self.fps * self.duration
             
-            # If skip_frames is True, reduce the number of frames for faster generation
-            if self.skip_frames:
-                frame_step = max(1, total_frames // 100)  # Generate only ~100 frames
-                frame_indices = range(0, total_frames, frame_step)
-                total_frames = len(frame_indices)
-            else:
-                frame_indices = range(total_frames)
+            # Determine frame sampling based on quality setting
+            if self.quality == 'low':
+                # Super low quality - generate only about 60 frames regardless of duration
+                frame_count = min(60, total_frames)
+                frame_step = max(1, total_frames // frame_count)
+            elif self.quality == 'medium':
+                # Medium quality - generate about 150 frames regardless of duration
+                frame_count = min(150, total_frames)
+                frame_step = max(1, total_frames // frame_count)
+            else:  # high
+                # High quality - generate about 300 frames regardless of duration
+                frame_count = min(300, total_frames)
+                frame_step = max(1, total_frames // frame_count)
             
-            # Create figure for animation
-            fig = Figure(figsize=(10, 8), dpi=self.dpi)
-            ax = fig.add_subplot(111)
+            # Calculate frame indices to generate
+            frame_indices = list(range(0, total_frames, frame_step))
+            if not frame_indices or frame_indices[-1] != total_frames - 1:
+                frame_indices.append(total_frames - 1)  # Always include the last frame
+            actual_frames_to_generate = len(frame_indices)
             
-            # Set up the axes
-            ax.set_xlabel('X (mm)')
-            ax.set_ylabel('Y (mm)')
-            ax.set_title('G-code Visualization')
-            ax.grid(True, linestyle='--', alpha=0.7)
+            # Print info for debugging
+            print(f"Generating {actual_frames_to_generate} frames out of {total_frames} total frames")
+            print(f"Positions: {num_positions}, Colors: {len(self.simulator.colors)}")
+            
+            # Show the unique colors we will be using
+            unique_colors = set(tuple(c) for c in self.simulator.colors)
+            print(f"Unique colors in G-code: {unique_colors}")
+            
+            # Determine image dimensions and create blank image
+            width, height = 800, 600
             
             # Get the bounds for the plot
             min_x, min_y, max_x, max_y = self.simulator.bounds
             margin = (max(max_x - min_x, max_y - min_y) * 0.05) or 10
-            ax.set_xlim(min_x - margin, max_x + margin)
-            ax.set_ylim(min_y - margin, max_y + margin)
+            x_range = (min_x - margin, max_x + margin)
+            y_range = (min_y - margin, max_y + margin)
             
-            # Determine the frame indices to generate
-            frames_to_generate = frame_indices if self.skip_frames else range(total_frames)
+            # Calculate scaling factors to convert from G-code coordinates to image pixels
+            x_scale = width / (x_range[1] - x_range[0])
+            y_scale = height / (y_range[1] - y_range[0])
             
-            # Generate frames
-            for frame_idx, i in enumerate(frames_to_generate):
+            # Function to convert G-code coordinates to image pixels
+            def to_pixel(x, y):
+                px = int((x - x_range[0]) * x_scale)
+                py = height - int((y - y_range[0]) * y_scale)  # Flip Y-axis
+                return px, py
+            
+            # Create video writer directly
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            video = cv2.VideoWriter(self.output_path, fourcc, self.fps, (width, height))
+            
+            # Generate and write frames directly to video
+            for frame_idx, i in enumerate(frame_indices):
+                # Create blank image with white background
+                image = np.ones((height, width, 3), dtype=np.uint8) * 255
+                
                 # Calculate the corresponding position index
                 position_idx = min(int(i * num_positions / total_frames), num_positions - 1)
                 
-                # Clear previous plot
-                ax.clear()
+                # Draw grid lines (light gray)
+                grid_color = (240, 240, 240)
+                grid_step = 50  # pixels
+                for x in range(0, width, grid_step):
+                    cv2.line(image, (x, 0), (x, height), grid_color, 1)
+                for y in range(0, height, grid_step):
+                    cv2.line(image, (0, y), (width, y), grid_color, 1)
                 
-                # Re-setup the axes
-                ax.set_xlabel('X (mm)')
-                ax.set_ylabel('Y (mm)')
-                ax.set_title('G-code Visualization')
-                ax.grid(True, linestyle='--', alpha=0.7)
-                ax.set_xlim(min_x - margin, max_x + margin)
-                ax.set_ylim(min_y - margin, max_y + margin)
+                # Draw axes (light gray)
+                cv2.line(image, (0, height//2), (width, height//2), (200, 200, 200), 1)
+                cv2.line(image, (width//2, 0), (width//2, height), (200, 200, 200), 1)
                 
-                # Draw path up to current position with colors
+                # Draw origin point if in view
+                origin_pixel = to_pixel(0, 0)
+                if 0 <= origin_pixel[0] < width and 0 <= origin_pixel[1] < height:
+                    cv2.drawMarker(image, origin_pixel, (0, 0, 0), cv2.MARKER_CROSS, 10, 2)
+                
+                # Draw path up to current position (use color if available)
                 positions = self.simulator.positions[:position_idx+1]
                 colors = self.simulator.colors[:position_idx+1]
                 
-                if positions and len(positions) > 1:
-                    # Create a colored path by drawing segments with appropriate colors
+                if len(positions) > 1:
                     for j in range(1, len(positions)):
-                        x_values = [positions[j-1][0], positions[j][0]]
-                        y_values = [positions[j-1][1], positions[j][1]]
-                        r, g, b = colors[j]
-                        color_normalized = (r/255, g/255, b/255)
-                        ax.plot(x_values, y_values, '-', color=color_normalized, 
-                               alpha=0.7, linewidth=0.8)
+                        # Get positions and colors
+                        start_pos = positions[j-1]
+                        end_pos = positions[j]
+                        color = colors[j]
+                        
+                        # Convert to BGR format for OpenCV (swap R and B)
+                        bgr_color = (int(color[2]), int(color[1]), int(color[0]))
+                        
+                        # Draw line segment
+                        start_pixel = to_pixel(start_pos[0], start_pos[1])
+                        end_pixel = to_pixel(end_pos[0], end_pos[1])
+                        cv2.line(image, start_pixel, end_pixel, bgr_color, 1)
                 
                 # Count visible dots
                 visible_dot_count = 0
@@ -207,81 +263,61 @@ class AnimationGeneratorThread(QThread):
                 dot_colors = self.simulator.dot_colors[:visible_dot_count]
                 
                 if dots:
-                    x_values = [dot[0] for dot in dots]
-                    y_values = [dot[1] for dot in dots]
-                    rgba_colors = [(r/255, g/255, b/255, 0.7) for r, g, b in dot_colors]
-                    ax.scatter(x_values, y_values, s=30, c=rgba_colors, marker='o', edgecolors='none')
+                    for j, (dot, color) in enumerate(zip(dots, dot_colors)):
+                        dot_pixel = to_pixel(dot[0], dot[1])
+                        # Ensure pixel is within bounds
+                        if 0 <= dot_pixel[0] < width and 0 <= dot_pixel[1] < height:
+                            # Convert to BGR format for OpenCV
+                            bgr_color = (int(color[2]), int(color[1]), int(color[0]))
+                            cv2.circle(image, dot_pixel, 4, bgr_color, -1)  # Filled circle
                 
-                # Show current position
+                # Draw current position
                 if position_idx < num_positions:
-                    pos, color = self.simulator.get_frame(position_idx)
-                    if pos:
-                        r, g, b = color
-                        color_normalized = (r/255, g/255, b/255)
-                        ax.plot(pos[0], pos[1], 'o', markersize=8, markeredgecolor='black', markerfacecolor=color_normalized)
+                    current_pos = positions[position_idx]
+                    current_color = colors[position_idx]
+                    current_pixel = to_pixel(current_pos[0], current_pos[1])
+                    # Ensure pixel is within bounds
+                    if 0 <= current_pixel[0] < width and 0 <= current_pixel[1] < height:
+                        # Draw highlighted position
+                        cv2.circle(image, current_pixel, 7, (0, 0, 0), 1)  # Black outline
+                        # Convert color to BGR
+                        bgr_color = (int(current_color[2]), int(current_color[1]), int(current_color[0]))
+                        cv2.circle(image, current_pixel, 6, bgr_color, -1)  # Filled circle
                 
-                # Draw the origin
-                ax.plot(0, 0, 'kx', markersize=8)
+                # Add title and information
+                cv2.putText(image, "G-code Visualization", (10, 30), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+                cv2.putText(image, f"Frame: {i}/{total_frames}", (10, 60), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
                 
-                # Add color legend
-                unique_colors = {}
-                for j, color in enumerate(self.simulator.dot_colors[:visible_dot_count]):
-                    color_key = tuple(color)
-                    if color_key not in unique_colors and len(unique_colors) < 10:  # Limit to 10 colors in legend
-                        unique_colors[color_key] = f"RGB{color_key}"
+                # Add color legend (show up to 8 unique colors)
+                if dot_colors:
+                    # Use dictionary to keep track of unique colors
+                    unique_color_dict = {}
+                    for color in dot_colors:
+                        color_key = tuple(color)
+                        if color_key not in unique_color_dict and len(unique_color_dict) < 8:
+                            unique_color_dict[color_key] = True
+                    
+                    # Draw color legend
+                    legend_y = 90
+                    for color in unique_color_dict:
+                        bgr_color = (int(color[2]), int(color[1]), int(color[0]))
+                        cv2.circle(image, (20, legend_y), 10, bgr_color, -1)
+                        # Draw color value text
+                        rgb_text = f"RGB({color[0]}, {color[1]}, {color[2]})"
+                        cv2.putText(image, rgb_text, (35, legend_y+5), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1)
+                        legend_y += 25
                 
-                # Add color swatches to the legend
-                handles = []
-                labels = []
-                for color, label in unique_colors.items():
-                    r, g, b = color
-                    color_normalized = (r/255, g/255, b/255)
-                    handles.append(plt.Line2D([0], [0], marker='o', color='w', 
-                                             markerfacecolor=color_normalized, markersize=10))
-                    labels.append(label)
-                
-                if handles:
-                    ax.legend(handles, labels, loc='upper right', 
-                             title="Color Palette", framealpha=0.7)
-                
-                # Save the frame
-                frame_path = os.path.join(self.temp_dir, f'frame_{frame_idx:05d}.png')
-                fig.savefig(frame_path)
+                # Write frame directly to video
+                video.write(image)
                 
                 # Update progress
-                progress = int((frame_idx + 1) / len(frames_to_generate) * 100)
+                progress = int((frame_idx + 1) / actual_frames_to_generate * 100)
                 self.progress_updated.emit(progress)
             
-            # Generate video from frames using OpenCV
-            first_frame = cv2.imread(os.path.join(self.temp_dir, 'frame_00000.png'))
-            if first_frame is None:
-                self.error.emit("Failed to read generated frames")
-                return
-                
-            height, width, _ = first_frame.shape
-            
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            video = cv2.VideoWriter(self.output_path, fourcc, self.fps, (width, height))
-            
-            # If we skipped frames during generation, need to handle it during video creation
-            if self.skip_frames:
-                # For each frame in the output video
-                for i in range(total_frames):
-                    # Find the closest generated frame
-                    closest_idx = min(range(len(frames_to_generate)), 
-                                    key=lambda x: abs(frames_to_generate[x] - i))
-                    frame_path = os.path.join(self.temp_dir, f'frame_{closest_idx:05d}.png')
-                    frame = cv2.imread(frame_path)
-                    if frame is not None:
-                        video.write(frame)
-            else:
-                # Use all generated frames in order
-                for i in range(len(frames_to_generate)):
-                    frame_path = os.path.join(self.temp_dir, f'frame_{i:05d}.png')
-                    frame = cv2.imread(frame_path)
-                    if frame is not None:
-                        video.write(frame)
-            
+            # Release video writer
             video.release()
             
             # Clean up temporary directory
@@ -290,6 +326,8 @@ class AnimationGeneratorThread(QThread):
             self.finished.emit(self.output_path)
         
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             self.error.emit(str(e))
             # Clean up temporary directory if it exists
             if self.temp_dir and os.path.exists(self.temp_dir):
@@ -339,10 +377,10 @@ class GcodeTab(QWidget):
         self.duration_spinbox.setValue(30)
         settings_layout.addRow("Duration (seconds):", self.duration_spinbox)
         
-        self.fast_mode_check = QCheckBox("Fast Generation Mode")
-        self.fast_mode_check.setChecked(True)
-        self.fast_mode_check.setToolTip("Generates fewer frames for faster processing")
-        settings_layout.addRow("", self.fast_mode_check)
+        self.quality_combo = QComboBox()
+        self.quality_combo.addItems(["Low (Fastest)", "Medium", "High (Slowest)"])
+        self.quality_combo.setCurrentIndex(0)  # Default to low quality for speed
+        settings_layout.addRow("Quality:", self.quality_combo)
         
         control_layout.addLayout(settings_layout)
         
@@ -362,7 +400,7 @@ class GcodeTab(QWidget):
         # Add info text
         info_label = QLabel(
             "Load a G-code file and generate an MP4 animation of the robot's painting path.\n"
-            "Note: The G-code text is not displayed to improve performance."
+            "Low quality generates faster but with fewer frames. High quality takes longer but is smoother."
         )
         info_label.setWordWrap(True)
         info_label.setAlignment(Qt.AlignCenter)
@@ -423,13 +461,22 @@ class GcodeTab(QWidget):
             # Disable button during generation
             self.generate_btn.setEnabled(False)
             
-            # Start the animation generation thread
-            self.animation_thread = AnimationGeneratorThread(
+            # Get quality setting
+            quality_text = self.quality_combo.currentText()
+            if "Low" in quality_text:
+                quality = "low"
+            elif "High" in quality_text:
+                quality = "high"
+            else:
+                quality = "medium"
+            
+            # Start the optimized animation generation thread
+            self.animation_thread = OptimizedAnimationThread(
                 self.simulator,
                 output_path,
                 fps=self.fps_spinbox.value(),
                 duration=self.duration_spinbox.value(),
-                skip_frames=self.fast_mode_check.isChecked()
+                quality=quality
             )
             
             # Connect signals
