@@ -38,9 +38,9 @@ class MuralBotApp(QMainWindow):
         
         # Set tab widget as the central widget
         self.setCentralWidget(self.tabs)
-        
-        # Connect signals between tabs
+          # Connect signals between tabs
         self.config_tab.config_updated.connect(self.image_tab.update_config)
+        self.config_tab.config_updated.connect(self.gcode_tab.update_config)
         self.image_tab.gcode_generated.connect(self.gcode_tab.load_gcode)
         
         # Load settings
