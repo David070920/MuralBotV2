@@ -1,1 +1,11 @@
-This is a project for the image processing part of a mural painting object and it's responsable with generating instructions for the hardware.
+This program is for the image processing part of a mural painting robot and has the task to generate a gcode file with the instructions to paint the mural.
+the robot has a number of spray cans loaded onto it and is attached to a wall.
+I want this program to have a gui app from where I can run the generation.
+In the gui the first thing that should appear is the config, where i can enter:
+the wall height and width
+the number of colors for the robot to use
+the number of colors in a batch (the number of colors that the robot can hold at one time, in order to change the batch the robot needs to go to the bottom left corner of the wall)
+the resolution in mm (the diameter of a spray dot painted by the robot)
+other settings you may think are relevant
+the next tab should be the tab where i upload the image and have the gcode generation button and also display the color pallette that will be used and how the colors will be divided in batches, along with a image preview
+I also want to have a gcode visualization in the gui, where i can see a animation of how the robot will print the wall.
