@@ -1,9 +1,14 @@
-"""
-Test file to check if GcodeTab can be imported properly.
-"""
+#!/usr/bin/env python3
+"""Test file for checking imports."""
 
-try:
-    from gcode_tab import GcodeTab
-    print("SUCCESS: GcodeTab was successfully imported!")
-except ImportError as e:
-    print(f"FAILED: Could not import GcodeTab. Error: {e}")
+from PyQt5.QtWidgets import QWidget
+from PyQt5.QtCore import pyqtSignal
+
+class TestClass(QWidget):
+    """Test class for checking imports."""
+    
+    test_signal = pyqtSignal(str)
+    
+    def __init__(self):
+        super().__init__()
+        print("TestClass initialized")
