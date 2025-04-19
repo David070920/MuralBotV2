@@ -10,6 +10,23 @@ import math
 import time
 from collections import defaultdict
 
+# Import advanced dithering algorithms
+try:
+    from image_processor_dithering import (
+        apply_jarvis_dithering,
+        apply_stucki_dithering,
+        apply_atkinson_dithering,
+        apply_sierra_dithering,
+        apply_enhanced_floyd_steinberg,
+        apply_blue_noise_dithering,
+        apply_pattern_dithering,
+        apply_halftone_dithering
+    )
+    ADVANCED_DITHERING_AVAILABLE = True
+except ImportError:
+    ADVANCED_DITHERING_AVAILABLE = False
+    print("Advanced dithering algorithms not available. Using built-in methods only.")
+
 class ImageProcessor:
     """Process images and generate G-code for the mural painting robot."""
     
@@ -112,15 +129,39 @@ class ImageProcessor:
             )
             
             # Convert palette to uint8
-            palette = np.uint8(palette)
+            palette = np.uint8(palette)        # Apply dithering if selected
+        dithering_method = self.config["dithering_method"]
         
-        # Apply dithering if selected
-        if self.config["dithering_method"] == "Floyd-Steinberg":
+        # Basic dithering methods (built-in)
+        if dithering_method == "Floyd-Steinberg":
             quantized_image = self._apply_floyd_steinberg_dithering(resized_image, palette)
-        elif self.config["dithering_method"] == "Ordered":
+        elif dithering_method == "Ordered":
             quantized_image = self._apply_ordered_dithering(resized_image, palette)
+        # Advanced dithering methods (from imported module)
+        elif ADVANCED_DITHERING_AVAILABLE:
+            if dithering_method == "Jarvis-Judice-Ninke":
+                quantized_image = apply_jarvis_dithering(resized_image, palette)
+            elif dithering_method == "Stucki":
+                quantized_image = apply_stucki_dithering(resized_image, palette)
+            elif dithering_method == "Atkinson":
+                quantized_image = apply_atkinson_dithering(resized_image, palette)
+            elif dithering_method == "Sierra":
+                quantized_image = apply_sierra_dithering(resized_image, palette)
+            elif dithering_method == "Enhanced Floyd-Steinberg":
+                quantized_image = apply_enhanced_floyd_steinberg(resized_image, palette)
+            elif dithering_method == "Blue Noise":
+                quantized_image = apply_blue_noise_dithering(resized_image, palette)
+            elif dithering_method == "Pattern":
+                quantized_image = apply_pattern_dithering(resized_image, palette)
+            elif dithering_method == "Halftone":
+                quantized_image = apply_halftone_dithering(resized_image, palette)
+            else:
+                # No dithering - just use nearest color
+                quantized_image = palette[labels.flatten()].reshape(resized_image.shape)
         else:
-            # No dithering - just use nearest color
+            # If advanced dithering is not available, fall back to nearest color
+            if dithering_method not in ["Floyd-Steinberg", "Ordered", "None"]:
+                print(f"Warning: Advanced dithering method '{dithering_method}' not available, falling back to nearest color")
             quantized_image = palette[labels.flatten()].reshape(resized_image.shape)
         
         # Count color occurrences

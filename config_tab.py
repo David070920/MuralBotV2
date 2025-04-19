@@ -117,13 +117,24 @@ class ConfigTab(QWidget):
         color_mode_layout.addWidget(self.color_table)
         color_mode_layout.addRow(color_buttons_layout)
         color_mode_group.setLayout(color_mode_layout)
-        
-        # Advanced settings group
+          # Advanced settings group
         advanced_group = QGroupBox("Advanced Settings")
         advanced_layout = QFormLayout()
         
         self.dithering_method = QComboBox()
-        self.dithering_method.addItems(["None", "Floyd-Steinberg", "Ordered"])
+        self.dithering_method.addItems([
+            "None", 
+            "Floyd-Steinberg", 
+            "Ordered",
+            "Enhanced Floyd-Steinberg",
+            "Jarvis-Judice-Ninke",
+            "Stucki",
+            "Atkinson",
+            "Sierra",
+            "Blue Noise",
+            "Pattern",
+            "Halftone"
+        ])
         
         self.optimize_path = QCheckBox()
         self.optimize_path.setChecked(True)

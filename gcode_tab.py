@@ -249,30 +249,35 @@ class GcodeSimulator:
         is_spraying = False
         min_x, min_y = float("inf"), float("inf")
         max_x, max_y = float("-inf"), float("-inf")
+          # Various regex patterns for color detection
+        # Standard RGB format: ; Color: RGB(r, g, b)
+        std_color_re = re.compile(r"; Color: RGB\((\d+),\s*(\d+),\s*(\d+)\)")
         
-        # New regex pattern for numpy uint8 values
-        # This pattern captures values like np.uint8(198) and extracts the number inside
+        # Alternative format without RGB prefix: ; Color: (r, g, b)
+        alt_color_re = re.compile(r"; Color:\s*\((\d+),\s*(\d+),\s*(\d+)\)")
+        
+        # Tuple format from the palette comment: ([r, g, b])
+        tuple_color_re = re.compile(r";\s*Color \d+: RGB\((\d+),\s*(\d+),\s*(\d+)\)")
+        
+        # Format with "np.uint8" prefix
         numpy_color_re = re.compile(r"; Color: RGB\(np\.uint8\((\d+)\), np\.uint8\((\d+)\), np\.uint8\((\d+)\)\)")
-        
-        # Regular expression for standard RGB values
-        std_color_re = re.compile(r"; Color: RGB\((\d+), (\d+), (\d+)\)")
         
         for line in self.gcode_lines:
             line = line.strip()
             
-            # Check for numpy color format
-            numpy_match = numpy_color_re.search(line)
-            if numpy_match:
-                r, g, b = map(int, numpy_match.groups())
-                self.current_color = (r, g, b)
-                continue
+            # Try all regex patterns
+            for pattern in [std_color_re, alt_color_re, tuple_color_re, numpy_color_re]:
+                match = pattern.search(line)
+                if match:
+                    r, g, b = map(int, match.groups())
+                    self.current_color = (r, g, b)
+                    break
             
-            # Check for standard color format
-            std_match = std_color_re.search(line)
-            if std_match:
-                r, g, b = map(int, std_match.groups())
-                self.current_color = (r, g, b)
-                continue
+            # Also check for tool change commands which often indicate color changes
+            if line.startswith("T") and len(line) >= 2 and line[1].isdigit():
+                # This is a tool change command - we need to look for the preceding color comment
+                tool_num = int(line[1:].split()[0])
+                # We'll keep the current color, as the tool change usually follows a color comment
             
             # Skip empty lines and pure comments
             if not line or line.startswith(";"):
@@ -498,18 +503,28 @@ class OptimizedAnimationThread(QThread):
                         if 0 <= dot_pixel[0] < width and 0 <= dot_pixel[1] < height:
                             # Convert to BGR format for OpenCV
                             bgr_color = (int(color[2]), int(color[1]), int(color[0]))
-                            
-                            # Calculate dot size based on dot_resolution
-                            # Convert dot_resolution from mm to G-code units (same as wall dimensions)
+                              # Calculate dot size based on dot_resolution
+                            # The dot_resolution is in mm, convert to pixels based on wall dimensions
                             dot_size_mm = self.dot_resolution
-                            dot_size_gcode = dot_size_mm / 1000  # Convert mm to meters
                             
-                            # Calculate dot radius in pixels based on the scaling factors
-                            dot_radius_x = int(dot_size_gcode * x_scale / 2)
-                            dot_radius_y = int(dot_size_gcode * y_scale / 2)
-                            dot_radius = max(2, min(dot_radius_x, dot_radius_y))  # Ensure at least 2px radius
+                            # Calculate the fraction of the wall width/height this represents
+                            dot_fraction_x = dot_size_mm / (self.wall_width * 1000)
+                            dot_fraction_y = dot_size_mm / (self.wall_height * 1000)
                             
-                            cv2.circle(image, dot_pixel, dot_radius, bgr_color, -1)  # Filled circle
+                            # Convert to pixels
+                            dot_size_x = int(dot_fraction_x * width)
+                            dot_size_y = int(dot_fraction_y * height)
+                            
+                            # Use the average as the dot diameter
+                            dot_radius = max(3, (dot_size_x + dot_size_y) // 4)  # Ensure at least 3px radius
+                            
+                            # Draw filled circle with slight transparency for overlapping dots
+                            overlay = image.copy()
+                            cv2.circle(overlay, dot_pixel, dot_radius, bgr_color, -1)  # Filled circle
+                            
+                            # Apply the overlay with transparency
+                            alpha = 0.8  # Transparency factor
+                            cv2.addWeighted(overlay, alpha, image, 1 - alpha, 0, image)
                 
                 # Draw current position
                 if position_idx < num_positions:
