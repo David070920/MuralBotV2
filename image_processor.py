@@ -68,18 +68,51 @@ class ImageProcessor:
         # Resize image to match the number of dots
         resized_image = cv2.resize(original_image, (dots_width, dots_height), interpolation=cv2.INTER_AREA)
         
-        # Generate color palette (quantize colors)
-        num_colors = self.config["total_colors"]
-        palette_image = resized_image.reshape(-1, 3)
+        # Get the color mode from config (defaults to "Automatic" if not specified)
+        color_mode = self.config.get("color_mode", "Automatic")
         
-        # Use k-means clustering to find the most representative colors
-        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.1)
-        _, labels, palette = cv2.kmeans(
-            np.float32(palette_image), num_colors, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS
-        )
-        
-        # Convert palette to uint8
-        palette = np.uint8(palette)
+        # Handle different color modes
+        if color_mode == "Manual RGB" and "manual_colors" in self.config:
+            # Use manual RGB colors provided by the user
+            palette = np.array(self.config["manual_colors"], dtype=np.uint8)
+            num_colors = len(palette)
+            
+            # Reshape image for color mapping
+            palette_image = resized_image.reshape(-1, 3)
+            
+            # Find closest colors for each pixel (without clustering)
+            labels = np.zeros(palette_image.shape[0], dtype=np.int32)
+            for i, pixel in enumerate(palette_image):
+                distances = np.sqrt(np.sum((palette - pixel) ** 2, axis=1))
+                labels[i] = np.argmin(distances)
+            
+        elif color_mode == "Default Colors" and "default_colors" in self.config:
+            # Use default colors (red, green, yellow, blue, black, white)
+            palette = np.array(self.config["default_colors"], dtype=np.uint8)
+            num_colors = len(palette)
+            
+            # Reshape image for color mapping
+            palette_image = resized_image.reshape(-1, 3)
+            
+            # Find closest colors for each pixel (without clustering)
+            labels = np.zeros(palette_image.shape[0], dtype=np.int32)
+            for i, pixel in enumerate(palette_image):
+                distances = np.sqrt(np.sum((palette - pixel) ** 2, axis=1))
+                labels[i] = np.argmin(distances)
+            
+        else:  # Automatic mode (original functionality)
+            # Generate color palette (quantize colors)
+            num_colors = self.config["total_colors"]
+            palette_image = resized_image.reshape(-1, 3)
+            
+            # Use k-means clustering to find the most representative colors
+            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.1)
+            _, labels, palette = cv2.kmeans(
+                np.float32(palette_image), num_colors, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS
+            )
+            
+            # Convert palette to uint8
+            palette = np.uint8(palette)
         
         # Apply dithering if selected
         if self.config["dithering_method"] == "Floyd-Steinberg":

@@ -4,7 +4,8 @@ Configuration tab for MuralBot application.
 
 from PyQt5.QtWidgets import (QWidget, QFormLayout, QLabel, QLineEdit, 
                             QSpinBox, QDoubleSpinBox, QVBoxLayout, QPushButton,
-                            QGroupBox, QHBoxLayout, QCheckBox, QComboBox)
+                            QGroupBox, QHBoxLayout, QCheckBox, QComboBox,
+                            QTableWidget, QTableWidgetItem, QHeaderView)
 from PyQt5.QtCore import pyqtSignal, QSettings
 
 class ConfigTab(QWidget):
@@ -85,6 +86,38 @@ class ConfigTab(QWidget):
         robot_layout.addRow("Spray Delay:", self.spray_delay)
         robot_group.setLayout(robot_layout)
         
+        # Color Mode Settings group
+        color_mode_group = QGroupBox("Color Mode Settings")
+        color_mode_layout = QFormLayout()
+        
+        self.color_mode = QComboBox()
+        self.color_mode.addItems(["Automatic", "Manual RGB", "Default Colors"])
+        self.color_mode.currentIndexChanged.connect(self.update_color_mode)
+        
+        # Color table for manual RGB input
+        self.color_table = QTableWidget(0, 3)
+        self.color_table.setHorizontalHeaderLabels(["Red", "Green", "Blue"])
+        self.color_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.color_table.setVisible(False)
+        
+        # Add/Remove buttons for manual color table
+        color_buttons_layout = QHBoxLayout()
+        self.add_color_btn = QPushButton("Add Color")
+        self.add_color_btn.clicked.connect(self.add_color_row)
+        self.remove_color_btn = QPushButton("Remove Selected")
+        self.remove_color_btn.clicked.connect(self.remove_color_row)
+        color_buttons_layout.addWidget(self.add_color_btn)
+        color_buttons_layout.addWidget(self.remove_color_btn)
+        
+        # Hide buttons initially
+        self.add_color_btn.setVisible(False)
+        self.remove_color_btn.setVisible(False)
+        
+        color_mode_layout.addRow("Color Selection Mode:", self.color_mode)
+        color_mode_layout.addWidget(self.color_table)
+        color_mode_layout.addRow(color_buttons_layout)
+        color_mode_group.setLayout(color_mode_layout)
+        
         # Advanced settings group
         advanced_group = QGroupBox("Advanced Settings")
         advanced_layout = QFormLayout()
@@ -122,6 +155,7 @@ class ConfigTab(QWidget):
         # Add all layouts to main layout
         main_layout.addWidget(wall_group)
         main_layout.addWidget(robot_group)
+        main_layout.addWidget(color_mode_group)
         main_layout.addWidget(advanced_group)
         main_layout.addLayout(button_layout)
         main_layout.addStretch()
@@ -130,7 +164,7 @@ class ConfigTab(QWidget):
     
     def get_config(self):
         """Get the current configuration values."""
-        return {
+        config = {
             "wall_width": self.wall_width.value(),
             "wall_height": self.wall_height.value(),
             "total_colors": self.total_colors.value(),
@@ -142,8 +176,33 @@ class ConfigTab(QWidget):
             "dithering_method": self.dithering_method.currentText(),
             "optimize_path": self.optimize_path.isChecked(),
             "border_margin": self.border_margin.value(),
-            "home_position": self.home_position.currentText()
+            "home_position": self.home_position.currentText(),
+            "color_mode": self.color_mode.currentText()
         }
+        
+        # Add manual colors if in manual RGB mode
+        if self.color_mode.currentText() == "Manual RGB":
+            manual_colors = []
+            for row in range(self.color_table.rowCount()):
+                color = []
+                for col in range(3):
+                    spin_box = self.color_table.cellWidget(row, col)
+                    color.append(spin_box.value())
+                manual_colors.append(color)
+            config["manual_colors"] = manual_colors
+        
+        # Add default colors if in Default Colors mode
+        elif self.color_mode.currentText() == "Default Colors":            # Red, Green, Yellow, Blue, Black, White
+            config["default_colors"] = [
+                [255, 0, 0],     # Red
+                [0, 255, 0],     # Green
+                [255, 255, 0],   # Yellow
+                [0, 0, 255],     # Blue
+                [0, 0, 0],       # Black
+                [255, 255, 255]  # White
+            ]
+        
+        return config
     
     def save_config(self):
         """Save configuration to settings and emit signal."""
@@ -182,6 +241,29 @@ class ConfigTab(QWidget):
             self.border_margin.setValue(float(self.settings.value("config/border_margin")))
         if self.settings.contains("config/home_position"):
             self.home_position.setCurrentText(self.settings.value("config/home_position"))
+        if self.settings.contains("config/color_mode"):
+            self.color_mode.setCurrentText(self.settings.value("config/color_mode"))
+            
+            # Load manual colors if in Manual RGB mode
+            if self.color_mode.currentText() == "Manual RGB" and self.settings.contains("config/manual_colors"):
+                manual_colors = self.settings.value("config/manual_colors")
+                if manual_colors:
+                    # Clear existing rows
+                    while self.color_table.rowCount() > 0:
+                        self.color_table.removeRow(0)
+                    
+                    # Add saved colors
+                    for color in manual_colors:
+                        row = self.color_table.rowCount()
+                        self.color_table.insertRow(row)
+                        for col in range(3):
+                            spin_box = QSpinBox()
+                            spin_box.setRange(0, 255)
+                            spin_box.setValue(color[col])
+                            self.color_table.setCellWidget(row, col, spin_box)
+            
+            # Update UI based on loaded color mode
+            self.update_color_mode()
     
     def restore_defaults(self):
         """Restore default configuration values."""
@@ -197,3 +279,67 @@ class ConfigTab(QWidget):
         self.optimize_path.setChecked(True)
         self.border_margin.setValue(50.0)
         self.home_position.setCurrentText("Bottom Left")
+    
+    def update_color_mode(self):
+        """Update UI based on selected color mode"""
+        mode = self.color_mode.currentText()
+        
+        # Hide color table and buttons by default
+        self.color_table.setVisible(False)
+        self.add_color_btn.setVisible(False)
+        self.remove_color_btn.setVisible(False)
+        
+        # Show relevant UI elements based on mode
+        if mode == "Manual RGB":
+            self.color_table.setVisible(True)
+            self.add_color_btn.setVisible(True)
+            self.remove_color_btn.setVisible(True)
+            
+            # Initialize with at least one row if empty
+            if self.color_table.rowCount() == 0:
+                self.add_color_row()
+                
+        elif mode == "Default Colors":
+            # Default colors are predefined (red, green, yellow, blue, black, white)
+            # No additional UI needed as these are hardcoded
+            pass
+            
+        # Update total colors spin box based on mode
+        if mode == "Automatic":
+            self.total_colors.setEnabled(True)
+        elif mode == "Manual RGB":
+            self.total_colors.setValue(self.color_table.rowCount())
+            self.total_colors.setEnabled(False)
+        elif mode == "Default Colors":
+            self.total_colors.setValue(6)  # 6 default colors
+            self.total_colors.setEnabled(False)
+    
+    def add_color_row(self):
+        """Add a row to the color table for manual RGB input"""
+        row = self.color_table.rowCount()
+        self.color_table.insertRow(row)
+        
+        # Add RGB spin boxes (0-255)
+        for col in range(3):
+            spin_box = QSpinBox()
+            spin_box.setRange(0, 255)
+            # Set default values to make a random color
+            default_values = [255, 0, 0]  # Default to red
+            spin_box.setValue(default_values[col])
+            self.color_table.setCellWidget(row, col, spin_box)
+        
+        # Update total colors to match row count
+        self.total_colors.setValue(self.color_table.rowCount())
+    
+    def remove_color_row(self):
+        """Remove selected row from color table"""
+        selected_rows = self.color_table.selectedIndexes()
+        if selected_rows:
+            row = selected_rows[0].row()
+            self.color_table.removeRow(row)
+            # Update total colors to match row count
+            self.total_colors.setValue(self.color_table.rowCount())
+            
+            # Make sure we have at least one color
+            if self.color_table.rowCount() == 0:
+                self.add_color_row()
