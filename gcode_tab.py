@@ -446,90 +446,49 @@ class OptimizedAnimationThread(QThread):
             for frame_idx, i in enumerate(frame_indices):
                 # Create blank image with white background
                 image = np.ones((height, width, 3), dtype=np.uint8) * 255
-                
-                # Calculate the corresponding position index
+
+                # Calculate the corresponding position index for this frame
                 position_idx = min(int(i * num_positions / total_frames), num_positions - 1)
-                
-                # Draw grid lines (light gray)
-                grid_color = (240, 240, 240)
-                grid_step = 50  # pixels
-                for x in range(0, width, grid_step):
-                    cv2.line(image, (x, 0), (x, height), grid_color, 1)
-                for y in range(0, height, grid_step):
-                    cv2.line(image, (0, y), (width, y), grid_color, 1)
-                
-                # Draw axes (light gray)
-                cv2.line(image, (0, height//2), (width, height//2), (200, 200, 200), 1)
-                cv2.line(image, (width//2, 0), (width//2, height), (200, 200, 200), 1)
-                
-                # Draw origin point if in view
-                origin_pixel = to_pixel(0, 0)
-                if 0 <= origin_pixel[0] < width and 0 <= origin_pixel[1] < height:
-                    cv2.drawMarker(image, origin_pixel, (0, 0, 0), cv2.MARKER_CROSS, 10, 2)
-                
-                # Draw path up to current position (use color if available)
-                positions = self.simulator.positions[:position_idx+1]
-                colors = self.simulator.colors[:position_idx+1]
-                
-                if len(positions) > 1:
-                    for j in range(1, len(positions)):
-                        # Get positions and colors
-                        start_pos = positions[j-1]
-                        end_pos = positions[j]
-                        color = colors[j]
-                        
-                        # Convert to BGR format for OpenCV (swap R and B)
-                        bgr_color = (int(color[2]), int(color[1]), int(color[0]))
-                        
-                        # Draw line segment
-                        start_pixel = to_pixel(start_pos[0], start_pos[1])
-                        end_pixel = to_pixel(end_pos[0], end_pos[1])
-                        cv2.line(image, start_pixel, end_pixel, bgr_color, 1)
-                
-                # Count visible dots
+
+                # --- Begin pixel grid logic ---
+                # Calculate pixel grid resolution so each pixel is one spray dot
+                # Prevent division by zero and ensure at least 1 pixel
+                safe_dot_res = max(self.dot_resolution, 1e-6)
+                safe_wall_width = max(self.wall_width, 1e-6)
+                safe_wall_height = max(self.wall_height, 1e-6)
+                px_width = max(1, int(round(safe_wall_width * 1000 / safe_dot_res)))
+                px_height = max(1, int(round(safe_wall_height * 1000 / safe_dot_res)))
+                pixel_grid = np.ones((px_height, px_width, 3), dtype=np.uint8) * 255
+
+                # Map each spray dot to a pixel and color it
+                dots = self.simulator.dots[:]
+                dot_colors = self.simulator.dot_colors[:]
+                # Only show dots up to the current frame
                 visible_dot_count = 0
                 for j, pos in enumerate(self.simulator.positions[:position_idx+1]):
-                    if pos[2] < 1.0:  # Check if it's a spray position
+                    if pos[2] < 1.0:
                         visible_dot_count += 1
-                
-                # Show visible dots
-                dots = self.simulator.dots[:visible_dot_count]
-                dot_colors = self.simulator.dot_colors[:visible_dot_count]
-                
-                if dots:
-                    for j, (dot, color) in enumerate(zip(dots, dot_colors)):
-                        dot_pixel = to_pixel(dot[0], dot[1])
-                        # Ensure pixel is within bounds
-                        if 0 <= dot_pixel[0] < width and 0 <= dot_pixel[1] < height:
-                            # Convert to BGR format for OpenCV
-                            bgr_color = (int(color[2]), int(color[1]), int(color[0]))
-                              # Calculate dot size based on dot_resolution
-                            # The dot_resolution is in mm, convert to pixels based on wall dimensions
-                            dot_size_mm = self.dot_resolution
-                            
-                            # Calculate the fraction of the wall width/height this represents
-                            dot_fraction_x = dot_size_mm / (self.wall_width * 1000)
-                            dot_fraction_y = dot_size_mm / (self.wall_height * 1000)
-                            
-                            # Convert to pixels
-                            dot_size_x = int(dot_fraction_x * width)
-                            dot_size_y = int(dot_fraction_y * height)
-                            
-                            # Use the average as the dot diameter
-                            dot_radius = max(3, (dot_size_x + dot_size_y) // 4)  # Ensure at least 3px radius
-                            
-                            # Draw filled circle with slight transparency for overlapping dots
-                            overlay = image.copy()
-                            cv2.circle(overlay, dot_pixel, dot_radius, bgr_color, -1)  # Filled circle
-                            
-                            # Apply the overlay with transparency
-                            alpha = 0.8  # Transparency factor
-                            cv2.addWeighted(overlay, alpha, image, 1 - alpha, 0, image)
+                dots = dots[:visible_dot_count]
+                dot_colors = dot_colors[:visible_dot_count]
+
+                for (dot, color) in zip(dots, dot_colors):
+                    # Map G-code coordinates to pixel grid using wall as reference
+                    # (0,0) in G-code maps to (0, px_height-1) in pixel grid (bottom-left)
+                    x = int(dot[0] / safe_wall_width / 1000 * px_width)
+                    y = px_height - 1 - int(dot[1] / safe_wall_height / 1000 * px_height)
+                    # Clamp to grid
+                    if 0 <= x < px_width and 0 <= y < px_height:
+                        pixel_grid[y, x] = (int(color[2]), int(color[1]), int(color[0]))  # BGR
+
+                # Scale up pixel grid to fit display size
+                image = cv2.resize(pixel_grid, (width, height), interpolation=cv2.INTER_NEAREST)
                 
                 # Draw current position
-                if position_idx < num_positions:
-                    current_pos = positions[position_idx]
-                    current_color = colors[position_idx]
+                positions = self.simulator.positions[:position_idx+1]
+                colors = self.simulator.colors[:position_idx+1]
+                if position_idx < num_positions and positions:
+                    current_pos = positions[-1]
+                    current_color = colors[-1]
                     current_pixel = to_pixel(current_pos[0], current_pos[1])
                     # Ensure pixel is within bounds
                     if 0 <= current_pixel[0] < width and 0 <= current_pixel[1] < height:
