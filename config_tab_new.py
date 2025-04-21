@@ -336,7 +336,3 @@ class ConfigTab(QWidget):
             # Make sure we have at least one color
             if self.color_table.rowCount() == 0:
                 self.add_color_row()
-
-# Ensure this file has a proper configuration for export
-if __name__ == '__main__':
-    print("ConfigTab class defined and ready for import")

@@ -16,7 +16,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QMessageBox,
 from PyQt5.QtCore import QSettings, pyqtSignal, Qt
 from PyQt5.QtGui import QPixmap, QColor, QImage
 
-from config_tab import ConfigTab
+from config_tab_new import ConfigTab
 from image_processor import ImageProcessor
 
 # Define ColorPaletteTable class

@@ -1,14 +1,19 @@
-#!/usr/bin/env python3
-"""Test file for checking imports."""
+"""
+Simple test file to verify that the ConfigTab can be imported correctly.
+"""
 
-from PyQt5.QtWidgets import QWidget
-from PyQt5.QtCore import pyqtSignal
-
-class TestClass(QWidget):
-    """Test class for checking imports."""
+try:
+    # Attempt to import ConfigTab from config_tab
+    from config_tab import ConfigTab
+    print("SUCCESS: ConfigTab was successfully imported!")
+    print(f"ConfigTab class: {ConfigTab}")
+except ImportError as e:
+    print(f"FAILED: Could not import ConfigTab. Error: {e}")
     
-    test_signal = pyqtSignal(str)
-    
-    def __init__(self):
-        super().__init__()
-        print("TestClass initialized")
+    # Try to import the module directly to see what's in it
+    try:
+        import config_tab
+        print(f"The config_tab module was found and contains: {dir(config_tab)}")
+        print(f"Module location: {config_tab.__file__}")
+    except ImportError as e:
+        print(f"Could not import the config_tab module at all. Error: {e}")
