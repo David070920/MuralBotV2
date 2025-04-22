@@ -294,7 +294,7 @@ class ImageTab(QWidget):
         # Create the preview label
         preview_label = QLabel()
         preview_label.setAlignment(Qt.AlignCenter)
-        preview_label.setMinimumSize(200, 150)
+        preview_label.setMinimumSize(400, 300) # Increased size
         preview_label.setStyleSheet("border: 1px solid #cccccc;")
         
         # Convert the image to a pixmap and display it
@@ -303,7 +303,7 @@ class ImageTab(QWidget):
         q_image = QImage(image.data, width, height, bytes_per_line, QImage.Format_RGB888)
         pixmap = QPixmap.fromImage(q_image)
         pixmap = pixmap.scaled(
-            200, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation
+            400, 300, Qt.KeepAspectRatio, Qt.SmoothTransformation # Increased size
         )
         preview_label.setPixmap(pixmap)
         

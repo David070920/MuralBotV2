@@ -78,9 +78,10 @@ class ImageProcessor:
         wall_height_mm = self.config["wall_height"] * 1000  # convert to mm
         dot_size_mm = self.config["dot_resolution"]
         
-        # Calculate number of dots in each dimension
-        dots_width = int(wall_width_mm / dot_size_mm)
-        dots_height = int(wall_height_mm / dot_size_mm)
+        # Calculate number of dots in each dimension using the same logic as G-code visualization
+        safe_dot_size_mm = max(dot_size_mm, 1e-6) # Prevent division by zero
+        dots_width = max(1, int(round(wall_width_mm / safe_dot_size_mm)))
+        dots_height = max(1, int(round(wall_height_mm / safe_dot_size_mm)))
         
         # Resize image to match the number of dots
         resized_image = cv2.resize(original_image, (dots_width, dots_height), interpolation=cv2.INTER_AREA)
@@ -164,32 +165,63 @@ class ImageProcessor:
                 print(f"Warning: Advanced dithering method '{dithering_method}' not available, falling back to nearest color")
             quantized_image = palette[labels.flatten()].reshape(resized_image.shape)
         
-        # Count color occurrences
+        # Recalculate color counts based on the final dithered image
         color_counts = defaultdict(int)
-        for i in range(len(labels)):
-            color_idx = labels[i]
-            color_counts[int(color_idx)] += 1
-        
-        # Sort palette by usage frequency
-        palette_with_counts = [(palette[i], color_counts[i]) for i in range(num_colors)]
+        # Create a mapping from tuple(color) to index for faster lookup
+        # Ensure palette is in a consistent format (list of tuples)
+        palette_tuples = [tuple(c) for c in (palette.tolist() if isinstance(palette, np.ndarray) else palette)]
+        palette_map = {color_tuple: i for i, color_tuple in enumerate(palette_tuples)}
+        num_colors = len(palette_tuples) # Get actual number of colors
+
+        # Iterate through the dithered image pixels
+        quantized_h, quantized_w, _ = quantized_image.shape
+        for y in range(quantized_h):
+            for x in range(quantized_w):
+                pixel_tuple = tuple(quantized_image[y, x])
+                # Find the index of this color in the original palette
+                if pixel_tuple in palette_map:
+                    color_idx = palette_map[pixel_tuple]
+                    color_counts[color_idx] += 1
+                else:
+                    # Fallback: Find the closest color if exact match fails (should be rare)
+                    distances = np.sum((palette - quantized_image[y, x])**2, axis=1)
+                    closest_idx = np.argmin(distances)
+                    color_counts[closest_idx] += 1
+                    # print(f"Warning: Pixel {pixel_tuple} not found exactly in palette. Mapping to closest: {palette_tuples[closest_idx]}") # Optional warning
+
+        # Sort palette by usage frequency (using the recalculated counts)
+        palette_list = list(palette_tuples) # Use the tuple list
+
+        palette_with_counts = []
+        for i in range(num_colors):
+            # Use .get(i, 0) in case a palette color ended up with zero count after dithering
+            palette_with_counts.append((palette_list[i], color_counts.get(i, 0)))
+
         palette_with_counts.sort(key=lambda x: x[1], reverse=True)
-        
-        sorted_palette = [color for color, _ in palette_with_counts]
+
+        # Convert sorted palette back to list of lists for consistency with previous return type
+        sorted_palette = [list(color) for color, _ in palette_with_counts]
         sorted_counts = [count for _, count in palette_with_counts]
-        
-        # Assign colors to batches
+
+        # Assign colors to batches (based on the sorted palette)
         colors_per_batch = self.config["colors_per_batch"]
         batches = []
         for i in range(len(sorted_palette)):
             batch_num = i // colors_per_batch + 1
             batches.append(batch_num)
-        
+
         if preview_only:
-            return quantized_image, sorted_palette, batches, sorted_counts
+            # Ensure returned palette is numpy array if that's expected downstream
+            # For preview, list of lists might be fine. Check generate_gcode usage.
+            # generate_gcode expects numpy array for palette comparison later.
+            return quantized_image, np.array(sorted_palette, dtype=np.uint8), batches, sorted_counts
+
+        # For G-code generation, ensure palette is numpy array before returning
+        final_sorted_palette = np.array(sorted_palette, dtype=np.uint8)
         
         # For actual G-code generation, we need to do more processing
         # (implemented in generate_gcode method)
-        return quantized_image, sorted_palette, batches, sorted_counts
+        return quantized_image, final_sorted_palette, batches, sorted_counts
     
     def generate_gcode(self, image_path, progress_callback=None):
         """
@@ -270,28 +302,31 @@ class ImageProcessor:
             gcode.append(f"G0 X{home_x} Y{home_y} ; Move to home for color change")
             gcode.append("M0 ; Pause for color change")
             gcode.append("")
-              # Find all dots for all colors in this batch
+            # Find all dots for this batch by finding the closest palette color for each pixel
             height, width, _ = quantized_image.shape
-            color_dots = {}
-            all_dots = []
-            
-            # Collect all dots for all colors in the batch
-            for color_idx in batch_color_indices:
-                color = palette[color_idx]
-                color_dots[color_idx] = []
-                
-                for y in range(height):
-                    for x in range(width):
-                        pixel = quantized_image[y, x]
-                        # Check if this pixel matches current color
-                        if np.array_equal(pixel, color):
-                            # Calculate real-world coordinates
-                            real_x = x * dot_size_mm + dot_size_mm / 2 + border_margin
-                            # Flip Y axis (image coordinates are top-left, G-code is bottom-left)
-                            real_y = (height - y - 1) * dot_size_mm + dot_size_mm / 2 + border_margin
-                            dot_info = (real_x, real_y, color_idx)
-                            color_dots[color_idx].append((real_x, real_y))
-                            all_dots.append(dot_info)
+            all_dots = [] # Reset for each batch
+
+            # Pre-calculate distances or use a faster method if performance is critical
+            # For now, calculate distance for each pixel
+            # Ensure palette is float32 for distance calculation robustness
+            palette_float = palette.astype(np.float32)
+            for y in range(height):
+                for x in range(width):
+                    pixel = quantized_image[y, x]
+                    pixel_float = pixel.astype(np.float32)
+
+                    # Find the closest color index in the full palette
+                    distances = np.sum((palette_float - pixel_float) ** 2, axis=1)
+                    closest_color_idx = np.argmin(distances)
+
+                    # Check if this closest color belongs to the current batch
+                    if closest_color_idx in batch_color_indices:
+                        # Calculate real-world coordinates
+                        real_x = x * dot_size_mm + dot_size_mm / 2 + border_margin
+                        # Flip Y axis (image coordinates are top-left, G-code is bottom-left)
+                        real_y = (height - y - 1) * dot_size_mm + dot_size_mm / 2 + border_margin
+                        dot_info = (real_x, real_y, closest_color_idx)
+                        all_dots.append(dot_info)
             
             # Divide the wall into grid regions for efficient painting
             region_size = 5 * dot_size_mm  # Adjust region size as needed
